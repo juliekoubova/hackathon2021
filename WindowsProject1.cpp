@@ -357,16 +357,13 @@ struct Element {
 
 	const char* comment = "";
 	uint32_t hit_test_code = HTCLIENT;
-	bool synthesize_client_moves = false;
 	std::unique_ptr<Renderer> renderer;
 
 	explicit Element(
 		const char* comment,
-		uint32_t hit_test_code,
-		bool synthesize_client_moves = false
+		uint32_t hit_test_code
 	) : comment{ comment },
-		hit_test_code{ hit_test_code },
-		synthesize_client_moves{ synthesize_client_moves }
+		hit_test_code{ hit_test_code }
 	{
 	}
 
@@ -419,14 +416,14 @@ std::ostream& operator<<(std::ostream& stream, const Element* el) {
 
 enum class MouseButton { Left, Right, Other };
 
-struct MouseState {
+struct MouseDownState {
 	std::optional<MouseButton> button;
 	Element* element = nullptr;
 };
 
 Element max{ "max", HTMAXBUTTON };
 Element close{ "close", HTCLOSE };
-Element title{ "title", HTCAPTION, true };
+Element title{ "title", HTCAPTION };
 Element min{ "min", HTMINBUTTON };
 Element icon{ "icon", HTSYSMENU };
 Element canvas{ "canvas", HTCLIENT };
@@ -437,7 +434,7 @@ UIComposition::CompositionColorBrush mouse_down_brush = nullptr;
 UIComposition::SpriteVisual mouse_visual = nullptr;
 
 std::vector<std::reference_wrapper<Element>> elements{ canvas, title, icon, min, max, close };
-MouseState mouse_state;
+MouseDownState mouse_state;
 
 template <typename Callable, typename...Args>
 void ForEachElement(Callable&& callable, Args&&... args) {
@@ -469,11 +466,55 @@ Element* FindElementWithHT(WPARAM ht) {
 	return FindElement([ht](const Element& element) {return element.hit_test_code == ht; });
 }
 
+void MouseOver(Element& element, HWND hwnd) {
+	ForEachElement([&element](Element& el) {
+		if (&el == &element) {
+			el.SetState(&el == mouse_state.element ? RendererState::MouseDown : RendererState::MouseOver);
 
-void MouseOver(Element* element) {
-	ForEachElement([element](Element& el) {
-		el.SetState(&el == element ? RendererState::MouseOver : RendererState::Normal);
+		}
+		else {
+			el.SetState(RendererState::Normal);
+		}
 		});
+
+	TRACKMOUSEEVENT tme = { sizeof(tme) };
+	tme.hwndTrack = hwnd;
+	tme.dwFlags = TME_HOVER | TME_LEAVE;
+
+	if (element.hit_test_code != HTCLIENT)
+	{
+		//
+		// Problem: Because this mouse move is 'simulated' from WM_NCMOUSEMOVE calling TrackMouseEvent
+		//          without the TME_NONCLIENT will generate the WM_MOUSELEAVE immediately.
+		//
+		//          Our window never uses HTCLIENT, so all WM_MOUSE messages are for the max button
+		//          (which requires TME_NONCLIENT). If we ever used HTCLIENT in NCHITTEST this call
+		//          to TrackMouseEvent would need to know if the original HT code was HTCLIENT and
+		//          not use TME_NONCLIENT.
+		//
+
+		tme.dwFlags |= TME_NONCLIENT;
+	}
+
+	// Call TrackMouseEvent to ensure we see a WM_MOUSELEAVE.
+	::TrackMouseEvent(&tme);
+}
+
+void MouseLeave() {
+	ForEachElement([](Element& el) {
+		el.SetState(RendererState::Normal);
+		});
+	mouse_visual.Brush(nullptr);
+}
+
+void MouseMove(Element* element, HWND hwnd) {
+	if (element) {
+		MouseOver(*element, hwnd);
+	}
+	else {
+		MouseLeave();
+	}
+	mouse_visual.Brush(mouse_brush);
 }
 
 void MouseDown(Element* element, MouseButton button) {
@@ -484,8 +525,8 @@ void MouseDown(Element* element, MouseButton button) {
 	mouse_state.button = button;
 }
 
-void MouseUp(Element* element) {
-	MouseOver(element);
+void MouseUp(Element* element, HWND hwnd) {
+	MouseMove(element, hwnd);
 	mouse_state.element = nullptr;
 	mouse_state.button = std::nullopt;
 }
@@ -639,7 +680,7 @@ void HandleMouseUp(Element* element, HWND hwnd, LPARAM lparam, MouseButton butto
 			}
 		}
 	}
-	MouseUp(element);
+	MouseUp(element, hwnd);
 }
 
 #define LOG_MESSAGE(message) case (message): printf(#message " wParam=%08x lParam=%08x\n", (uint32_t)wParam, (uint32_t)lParam); break;
@@ -664,12 +705,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 
 		auto element = FindElementWithHT(wParam);
-		LogMessage(true, "mouse move", element);
-		MouseOver(element);
-
-		if (element && element->synthesize_client_moves) {
-			ConvertToClientMessage(hwnd, msg, wParam, lParam);
-		}
+		MouseMove(element, hwnd);
 
 		return 0;
 
@@ -681,47 +717,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	}
 	case WM_MOUSEMOVE:
 	{
-		TRACKMOUSEEVENT tme = { sizeof(tme) };
-		tme.hwndTrack = hwnd;
-		tme.dwFlags = TME_HOVER | TME_LEAVE;
-
 		auto element = FindElementAtClientLParam(lParam);
-		LogMessage(false, "mouse move", element);
-		MouseOver(element);
+		MouseMove(element, hwnd);
 
-		if (!mouse_visual.Brush()) {
-			mouse_visual.Brush(mouse_brush);
-		}
 		mouse_visual.Offset({ (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam), 0.0f });
 
-		if (element && element->hit_test_code != HTCLIENT)
-		{
-			//
-			// Problem: Because this mouse move is 'simulated' from WM_NCMOUSEMOVE calling TrackMouseEvent
-			//          without the TME_NONCLIENT will generate the WM_MOUSELEAVE immediately.
-			//
-			//          Our window never uses HTCLIENT, so all WM_MOUSE messages are for the max button
-			//          (which requires TME_NONCLIENT). If we ever used HTCLIENT in NCHITTEST this call
-			//          to TrackMouseEvent would need to know if the original HT code was HTCLIENT and
-			//          not use TME_NONCLIENT.
-			//
-
-			tme.dwFlags |= TME_NONCLIENT;
-		}
-
-		// Call TrackMouseEvent to ensure we see a WM_MOUSELEAVE.
-		::TrackMouseEvent(&tme);
 		break;
 	}
 
 
 	case WM_NCMOUSELEAVE:
-		MouseOver(nullptr);
-		mouse_visual.Brush(nullptr);
+		MouseLeave();
 		break;
 
 	case WM_MOUSELEAVE:
-		MouseOver(nullptr);
+		MouseLeave();
 		break;
 
 	case WM_LBUTTONDOWN:
