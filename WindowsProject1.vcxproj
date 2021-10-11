@@ -150,6 +150,7 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="system_menu.hpp" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="Windows.UI.Composition.Mica.h" />
     <ClInclude Include="WindowsProject1.h" />

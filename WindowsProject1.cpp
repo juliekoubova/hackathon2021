@@ -307,31 +307,6 @@ private:
 	float scale_ = 1.0f;
 };
 
-class DebugTextRenderer final : public DelegatingRenderer<SpriteRenderer> {
-public:
-
-	DebugTextRenderer(UIComposition::Compositor compositor)
-		: DelegatingRenderer{ compositor } {}
-
-	void Text(winrt::hstring text) {
-		Delegate().SetBrushFactory([text = std::move(text)](UIComposition::Compositor compositor, float rasterization_scale) {
-			Foundation::Size size{ 200 * rasterization_scale, 50 * rasterization_scale };
-			auto brush = CreateCanvasBrush(
-				compositor,
-				size,
-				[text](Canvas::CanvasDevice, Canvas::CanvasDrawingSession drawing_session) {
-					drawing_session.DrawTextW(text, { 8,8 }, UI::Colors::Black());
-				});
-			brush.Stretch(UIComposition::CompositionStretch::None);
-			brush.HorizontalAlignmentRatio(0);
-			brush.VerticalAlignmentRatio(0);
-			brush.SnapToPixels(true);
-			return brush;
-		});
-	}
-
-};
-
 std::unique_ptr<SpriteRenderer> MakeButtonGlyphRenderer(UIComposition::Compositor compositor, winrt::hstring glyph) {
 	return std::make_unique<SpriteRenderer>(
 		compositor,
@@ -457,7 +432,9 @@ Element icon{ "icon", HTSYSMENU };
 Element canvas{ "canvas", HTCLIENT };
 
 ButtonRenderer* max_renderer;
-DebugTextRenderer* canvas_renderer;
+UIComposition::CompositionColorBrush mouse_brush = nullptr;
+UIComposition::CompositionColorBrush mouse_down_brush = nullptr;
+UIComposition::SpriteVisual mouse_visual = nullptr;
 
 std::vector<std::reference_wrapper<Element>> elements{ canvas, title, icon, min, max, close };
 MouseState mouse_state;
@@ -547,6 +524,20 @@ void LayoutElements(const RECT& rcClient, uint32_t dpi) {
 	ForEachElement(&Element::SetDpi, dpi);
 }
 
+UIComposition::SpriteVisual CreateMouseVisual() {
+	auto ellipse = compositor.CreateEllipseGeometry();
+	ellipse.Radius({ 8, 8 });
+	ellipse.Center({ 8, 8 });
+
+	auto clip = compositor.CreateGeometricClip(ellipse);
+	auto sprite = compositor.CreateSpriteVisual();
+	sprite.AnchorPoint({ 0.5, 0.5 });
+	sprite.Brush(mouse_brush);
+	sprite.Size({ 16, 16 });
+	sprite.Clip(clip);
+	return sprite;
+}
+
 void CreateRenderers() {
 
 	title.renderer = std::make_unique<BackgroundRenderer>(
@@ -584,11 +575,10 @@ void CreateRenderers() {
 	);
 	root.Children().InsertAtTop(close.renderer->Visual());
 
-	auto canvas_ptr = std::make_unique<DebugTextRenderer>(compositor);
-	canvas_ptr->Text(L"hello");
-	canvas_renderer = canvas_ptr.get();
-	canvas.renderer = std::move(canvas_ptr);
-	root.Children().InsertAtTop(canvas.renderer->Visual());
+	mouse_brush = compositor.CreateColorBrush(UI::Colors::DarkRed());
+	mouse_down_brush = compositor.CreateColorBrush(UI::Colors::Yellow());
+	mouse_visual = CreateMouseVisual();
+	root.Children().InsertAtTop(mouse_visual);
 
 }
 
@@ -699,10 +689,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		LogMessage(false, "mouse move", element);
 		MouseOver(element);
 
-		std::wstringstream wss;
-		wss << L"x=" << GET_X_LPARAM(lParam) << L" y=" << GET_Y_LPARAM(lParam);
+		if (!mouse_visual.Brush()) {
+			mouse_visual.Brush(mouse_brush);
+		}
+		mouse_visual.Offset({ (float)GET_X_LPARAM(lParam), (float)GET_Y_LPARAM(lParam), 0.0f });
 
-		canvas_renderer->Text(wss.str().c_str());
 		if (element && element->hit_test_code != HTCLIENT)
 		{
 			//
@@ -726,6 +717,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 	case WM_NCMOUSELEAVE:
 		MouseOver(nullptr);
+		mouse_visual.Brush(nullptr);
 		break;
 
 	case WM_MOUSELEAVE:
@@ -736,6 +728,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		auto element = FindElementAtClientLParam(lParam);
 		MouseDown(element, MouseButton::Left);
+		mouse_visual.Brush(mouse_down_brush);
 		break;
 	}
 
@@ -787,6 +780,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		auto element = FindElementAtClientLParam(lParam);
 		HandleMouseUp(element, hwnd, lParam, MouseButton::Left);
+		mouse_visual.Brush(mouse_brush);
 		break;
 	}
 
@@ -963,7 +957,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-bool InitWindow(HINSTANCE hInst)
+void InitWindow(HINSTANCE hInst)
 {
 	PCWSTR wndClassName = L"WndClass";
 	PCWSTR windowTitle = L"BigMaxButton";
@@ -977,13 +971,9 @@ bool InitWindow(HINSTANCE hInst)
 	wc.lpszMenuName = NULL;
 	wc.lpszClassName = wndClassName;
 
-	if (!RegisterClassEx(&wc))
-	{
-		::MessageBoxW(NULL, L"RegisterClassEx Failed!", L"ERROR", MB_ICONEXCLAMATION | MB_OK);
-		return false;
-	}
+	THROW_LAST_ERROR_IF(::RegisterClassExW(&wc) == INVALID_ATOM);
 
-	if (!::CreateWindowExW(0,
+	THROW_LAST_ERROR_IF_NULL(::CreateWindowExW(0,
 		wndClassName,
 		windowTitle,
 		WS_OVERLAPPEDWINDOW,
@@ -994,23 +984,15 @@ bool InitWindow(HINSTANCE hInst)
 		nullptr,
 		nullptr,
 		hInst,
-		nullptr))
-	{
-		::MessageBoxW(NULL, L"CreateWindowEx Failed!", L"ERROR", MB_ICONEXCLAMATION | MB_OK);
-		return false;
-	}
+		nullptr));
 
-	return true;
 }
 
 int __stdcall wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ wchar_t*, _In_ int)
 {
 	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-	if (!InitWindow(hInstance))
-	{
-		return 1;
-	}
+	InitWindow(hInstance);
 
 	MSG msg;
 	while (::GetMessageW(&msg, nullptr, 0, 0))

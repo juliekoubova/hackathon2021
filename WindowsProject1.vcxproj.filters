@@ -30,6 +30,9 @@
     <ClInclude Include="Windows.UI.Composition.Mica.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="system_menu.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="WindowsProject1.cpp">
