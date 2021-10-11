@@ -48,24 +48,6 @@
     <Image Include="WindowsProject1.ico">
       <Filter>Resource Files</Filter>
     </Image>
-    <Image Include="96.png">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="120.png">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="144.png">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="168.png">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="192.png">
-      <Filter>Resource Files</Filter>
-    </Image>
-    <Image Include="216.png">
-      <Filter>Resource Files</Filter>
-    </Image>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

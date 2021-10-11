@@ -1,6 +1,6 @@
 #include "framework.h"
 #include <windowsx.h>
-#include <stdio.h>
+#include <iostream>
 
 const SIZE szInitial = { 700, 500 };
 
@@ -12,6 +12,18 @@ namespace UIComposition {
 }
 
 namespace Canvas = winrt::Microsoft::Graphics::Canvas;
+
+constexpr const wchar_t* SvgClose =
+L"<svg viewBox='0 0 16 16'><path d='M2.589 2.716l.058-.069a.498.498 0 01.637-.058l.069.058L8 7.293l4.646-4.647a.5.5 0 01.707.707L8.707 8l4.647 4.646a.5.5 0 01.058.638l-.058.069a.5.5 0 01-.638.058l-.069-.058L8 8.707l-4.646 4.647a.5.5 0 01-.707-.707L7.293 8 2.646 3.354a.501.501 0 01-.057-.638l.058-.069-.058.069z'></path></svg>";
+
+constexpr const wchar_t* SvgMaximize =
+L"<svg viewBox='0 0 16 16'><path d='M4.5 3A1.5 1.5 0 003 4.5v7A1.5 1.5 0 004.5 13h7a1.5 1.5 0 001.5-1.5v-7A1.5 1.5 0 0011.5 3h-7zm0 1h7a.5.5 0 01.5.5v7a.5.5 0 01-.5.5h-7a.5.5 0 01-.5-.5v-7a.5.5 0 01.5-.5z'></path></svg>";
+
+constexpr const wchar_t* SvgMinimize =
+L"<svg viewBox='0 0 16 16'><path d='M3.5 7h9c.28 0 .5.22.5.5s-.22.5-.5.5h-9c-.28 0-.5-.22-.5-.5s.22-.5.5-.5z'></path></svg>";
+
+constexpr const wchar_t* SvgRestore =
+L"<svg viewBox='0 0 16 16'><path d='M5.084 4a1.5 1.5 0 011.415-1h3.5a3 3 0 013 3v3.5a1.5 1.5 0 01-1 1.415V6a2 2 0 00-2-2H5.084z'></path><path d='M4.5 5h5A1.5 1.5 0 0111 6.5v5A1.5 1.5 0 019.5 13h-5A1.5 1.5 0 013 11.5v-5A1.5 1.5 0 014.5 5zm0 1a.5.5 0 00-.5.5v5a.5.5 0 00.5.5h5a.5.5 0 00.5-.5v-5a.5.5 0 00-.5-.5h-5z'></path></svg>";
 
 UIComposition::Compositor compositor{ nullptr };
 UIComposition::Desktop::DesktopWindowTarget target{ nullptr };
@@ -38,8 +50,8 @@ void SetBackdrop(UIComposition::Desktop::DesktopWindowTarget target) {
 	supports_backdrop->put_SystemBackdrop(brush.as<UIComposition::abi::ICompositionBrush>().get());
 }
 
-UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor compositor, const winrt::hstring& svg) {
-	auto size = winrt::Windows::Foundation::Size(100, 100);
+UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor compositor, const winrt::hstring& svg, float scale) {
+	auto size = winrt::Windows::Foundation::Size(16 * scale, 16 * scale);
 	auto canvas_device = Canvas::CanvasDevice::GetSharedDevice();
 	auto composition_device = Canvas::UI::Composition::CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device);
 	auto drawing_surface = composition_device.CreateDrawingSurface(
@@ -49,8 +61,17 @@ UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor 
 	);
 
 	{
+		winrt::Windows::Foundation::Rect rect{};
+		rect.Width = size.Width;
+		rect.Height = size.Height;
+
 		auto svg_document = Canvas::Svg::CanvasSvgDocument::LoadFromXml(canvas_device, svg);
-		auto drawing_session = Canvas::UI::Composition::CanvasComposition::CreateDrawingSession(drawing_surface);
+		auto drawing_session = Canvas::UI::Composition::CanvasComposition::CreateDrawingSession(
+			drawing_surface
+			//,
+			//rect,
+			//scale
+		);
 		drawing_session.DrawSvg(svg_document, size);
 	}
 
@@ -59,13 +80,14 @@ UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor 
 	return surface_brush;
 }
 
+enum class RendererState { Normal, MouseOver, MouseDown };
+
 class Renderer {
 public:
 	virtual ~Renderer() = default;
-	virtual void MouseEnter() = 0;
-	virtual void MouseLeave() = 0;
-	virtual void MouseDown() = 0;
-	virtual void MouseUp() = 0;
+	virtual void SetState(RendererState) {}
+	virtual void SetRasterizationScale(float) {}
+
 	virtual UIComposition::Visual Visual() = 0;
 };
 
@@ -75,6 +97,7 @@ struct RendererColors {
 	UI::Color hover;
 	UI::Color active;
 };
+
 
 class ContainerRenderer final : public Renderer {
 public:
@@ -88,20 +111,12 @@ public:
 		renderers_.emplace_back(std::move(renderer));
 	}
 
-	void MouseEnter() final {
-		ForEach(&Renderer::MouseEnter);
+	void SetState(RendererState state) final {
+		ForEach(&Renderer::SetState, state);
 	}
 
-	void MouseLeave() final {
-		ForEach(&Renderer::MouseLeave);
-	}
-
-	void MouseDown() final {
-		ForEach(&Renderer::MouseDown);
-	}
-
-	void MouseUp() final {
-		ForEach(&Renderer::MouseUp);
+	void SetRasterizationScale(float scale) final {
+		ForEach(&Renderer::SetRasterizationScale, scale);
 	}
 
 	UIComposition::Visual Visual() final { return visual_; }
@@ -130,23 +145,18 @@ public:
 		brush_.Color(background_colors.normal);
 	}
 
-	void MouseEnter() final {
-		brush_.Color(colors_.hover);
-	}
-
-	void MouseLeave() final {
-		mouse_down = false;
-		brush_.Color(colors_.normal);
-	}
-
-	void MouseDown() final {
-		mouse_down = true;
-		brush_.Color(colors_.active);
-	}
-
-	void MouseUp() final {
-		mouse_down = false;
-		brush_.Color(colors_.hover);
+	void SetState(RendererState state) final {
+		switch (state) {
+		case RendererState::MouseDown:
+			brush_.Color(colors_.active);
+			break;
+		case RendererState::MouseOver:
+			brush_.Color(colors_.hover);
+			break;
+		default:
+			brush_.Color(colors_.normal);
+			break;
+		}
 	}
 
 	UIComposition::Visual Visual() final { return visual_; }
@@ -155,29 +165,29 @@ private:
 	UIComposition::CompositionColorBrush brush_;
 	UIComposition::SpriteVisual visual_;
 	RendererColors colors_;
-	bool mouse_down = false;
 };
 
 class GlyphRenderer final : public Renderer {
 
 public:
-	GlyphRenderer(UIComposition::Compositor compositor, RendererColors colors)
+	GlyphRenderer(UIComposition::Compositor compositor, winrt::hstring glyph, RendererColors colors)
 		: visual_{ compositor.CreateSpriteVisual() },
-		brush_{ CreateSvgBrush(compositor, L"<svg><circle fill=\"#660000\" r=\"10\"/></svg>") }
+		brush_{ nullptr },
+		glyph_{ glyph },
+		compositor_{ compositor }
 	{
+		//brush_.AnchorPoint({ 0.5f, 0.5f });
+		//brush_.Offset({ 0.0f, 0.0f });
 		visual_.RelativeSizeAdjustment({ 1.0f, 1.0f });
 	}
 
-	void MouseEnter() final {
-	}
-
-	void MouseLeave() final {
-	}
-
-	void MouseDown() final {
-	}
-
-	void MouseUp() final {
+	void SetRasterizationScale(float scale) final {
+		if (scale != raster_scale_) {
+			brush_ = CreateSvgBrush(compositor_, glyph_, scale);
+			brush_.Stretch(UIComposition::CompositionStretch::None);
+			visual_.Brush(brush_);
+			raster_scale_ = scale;
+		}
 	}
 
 	UIComposition::Visual Visual() final { return visual_; }
@@ -185,25 +195,44 @@ public:
 private:
 	UIComposition::CompositionSurfaceBrush brush_;
 	UIComposition::SpriteVisual visual_;
+	UIComposition::Compositor compositor_;
+	winrt::hstring glyph_;
+	float raster_scale_ = 0;
 };
 
-std::unique_ptr<Renderer> CreateButtonRenderer(UIComposition::Compositor compositor, RendererColors background_colors) {
+std::unique_ptr<Renderer> CreateButtonRenderer(UIComposition::Compositor compositor, winrt::hstring glyph, RendererColors background_colors) {
 	auto container = std::make_unique<ContainerRenderer>(compositor);
 	container->InsertAtTop(std::make_unique<BackgroundRenderer>(compositor, background_colors));
-	container->InsertAtTop(std::make_unique<GlyphRenderer>(compositor, background_colors));
+	container->InsertAtTop(std::make_unique<GlyphRenderer>(compositor, glyph, background_colors));
 	return container;
 }
 
+
 struct Element {
 
-	uint32_t hit_test_code;
+	const char* comment = "";
+	uint32_t hit_test_code = HTCLIENT;
+	bool synthesize_client_moves = false;
 	std::unique_ptr<Renderer> renderer;
 
-	explicit Element(uint32_t hit_test_code = HTCLIENT) : hit_test_code{ hit_test_code } {
+	explicit Element(
+		const char* comment,
+		uint32_t hit_test_code,
+		bool synthesize_client_moves = false
+	) : comment{ comment },
+		hit_test_code{ hit_test_code },
+		synthesize_client_moves{ synthesize_client_moves }
+	{
 	}
 
 	bool Contains(const POINT& pt)const {
 		return PtInRect(&rect_, pt);
+	}
+
+	void SetDpi(uint32_t dpi) {
+		if (renderer) {
+			renderer->SetRasterizationScale(dpi / 96.0f);
+		}
 	}
 
 	void Bounds(const RECT& rect) {
@@ -214,73 +243,64 @@ struct Element {
 		}
 	}
 
-	void MouseEnter() {
-		if (renderer) renderer->MouseEnter();
-	}
+	const RECT& Bounds() const { return rect_; }
 
-	void MouseLeave() {
-		if (renderer) renderer->MouseLeave();
-	}
-
-	void MouseDown() {
-		if (renderer) renderer->MouseDown();
-	}
-
-	void MouseUp() {
-		if (renderer) renderer->MouseUp();
+	void SetState(RendererState state) {
+		if (renderer) renderer->SetState(state);
 	}
 
 private:
-	RECT rect_{ 0,0,0,0 };
-
+	RECT rect_{};
 };
 
-Element max{ HTMAXBUTTON };
-Element close{ HTCLOSE };
-Element top{ HTCAPTION };
-//Element buttons{ HTCLIENT };
+std::ostream& operator<<(std::ostream& stream, const RECT& rect) {
+	auto width = (rect.right - rect.left);
+	auto height = (rect.bottom - rect.top);
+	return stream << rect.left << "," << rect.top << " " << width << "x" << height;
+}
 
-std::vector<std::reference_wrapper<Element>> elements{ max, close, top };
+std::ostream& operator<<(std::ostream& stream, const Element& el) {
+	return stream << el.comment << " (" << el.Bounds() << ")";
+}
+
+std::ostream& operator<<(std::ostream& stream, const Element* el) {
+	if (el) {
+		return stream << *el;
+	}
+	else {
+		return stream << "(none)";
+	}
+}
+
+
+Element max{ "max", HTMAXBUTTON };
+Element close{ "close", HTCLOSE };
+Element title{ "title", HTCAPTION, true };
+Element min{ "min", HTMINBUTTON };
+Element icon{ "icon", HTSYSMENU };
+
+std::vector<std::reference_wrapper<Element>> elements{ title, icon, min, max, close };
 Element* mouse_down_element = nullptr;
-Element* mouse_over_element = nullptr;
 
-void MouseOver(Element* element) {
-	if (mouse_over_element == element) {
-		return;
-	}
-	if (mouse_over_element) {
-		mouse_over_element->MouseLeave();
-	}
-	mouse_over_element = element;
-	if (mouse_over_element) {
-		element->MouseEnter();
-	}
-}
-
-Element* MouseDown(Element* element) {
-	MouseOver(element);
-	if (element) {
-		element->MouseDown();
-	}
-	std::swap(mouse_down_element, element);
-	return element;
-}
-
-void MouseUp(Element* element) {
-	MouseOver(element);
-	if (mouse_down_element) {
-		element->MouseUp();
-	}
-}
-
-
-Element* FindElementAt(POINT pt) {
+template <typename Callable, typename...Args>
+void ForEachElement(Callable&& callable, Args&&... args) {
 	for (Element& element : elements) {
-		if (element.Contains(pt)) {
-			return &element;
+		std::invoke(callable, element, args...);
+	}
+}
+
+template <typename Callable, typename...Args>
+Element* FindElement(Callable&& callable, Args&&... args) {
+	for (auto it = elements.crbegin(); it != elements.crend(); ++it) {
+		if (std::invoke(callable, *it, args...)) {
+			return &it->get();
 		}
 	}
 	return nullptr;
+}
+
+Element* FindElementAt(POINT pt) {
+	return FindElement(&Element::Contains, pt);
 }
 
 Element* FindElementAtClientLParam(LPARAM lParam) {
@@ -289,13 +309,96 @@ Element* FindElementAtClientLParam(LPARAM lParam) {
 }
 
 Element* FindElementWithHT(WPARAM ht) {
-	auto it = std::find_if(elements.cbegin(), elements.cend(), [ht](const Element& e) {return  e.hit_test_code == ht; });
-	return it == elements.cend() ? nullptr : &(it->get());
+	return FindElement([ht](const Element& element) {return element.hit_test_code == ht; });
+}
+
+
+void MouseOver(Element* element) {
+	ForEachElement([element](Element& el) {
+		el.SetState(&el == element ? RendererState::MouseOver : RendererState::Normal);
+		});
+}
+
+void MouseDown(Element* element) {
+	ForEachElement([element](Element& el) {
+		el.SetState(&el == element ? RendererState::MouseDown : RendererState::Normal);
+		});
+	mouse_down_element = element;
+}
+
+void MouseUp(Element* element) {
+	MouseOver(element);
+	mouse_down_element = nullptr;
+}
+
+void LayoutElements(const RECT& rcClient, uint32_t dpi) {
+
+	int kButtonHeight = MulDiv(47, dpi, 96);
+	int kButtonWidth = MulDiv(44, dpi, 96);
+
+	RECT rcTop = rcClient;
+	rcTop.bottom = kButtonHeight;
+	title.Bounds(rcTop);
+
+	RECT rcIcon = rcTop;
+	rcIcon.right = rcTop.left + kButtonWidth;
+	icon.Bounds(rcIcon);
+
+	RECT rcClose = rcTop;
+	rcClose.left = rcTop.right - kButtonWidth;
+	close.Bounds(rcClose);
+
+	RECT rcMaxButton = rcTop;
+	rcMaxButton.left = rcClose.left - kButtonWidth;
+	rcMaxButton.right = rcClose.left;
+	max.Bounds(rcMaxButton);
+
+	RECT rcMinButton = rcTop;
+	rcMinButton.left = rcMaxButton.left - kButtonWidth;
+	rcMinButton.right = rcMaxButton.left;
+	min.Bounds(rcMinButton);
+
+	ForEachElement(&Element::SetDpi, dpi);
+}
+
+void CreateRenderers() {
+	title.renderer = std::make_unique<BackgroundRenderer>(
+		compositor,
+		RendererColors{ UI::Colors::Aqua(), UI::Colors::Aqua(),  UI::Colors::Aqua() }
+	);
+	root.Children().InsertAtTop(title.renderer->Visual());
+
+	icon.renderer = std::make_unique<BackgroundRenderer>(
+		compositor,
+		RendererColors{ UI::Colors::BlueViolet(), UI::Colors::BlueViolet(),  UI::Colors::BlueViolet() }
+	);
+	root.Children().InsertAtTop(icon.renderer->Visual());
+
+	min.renderer = CreateButtonRenderer(
+		compositor,
+		SvgMinimize,
+		{ UI::Colors::Transparent(), UI::Colors::NavajoWhite(), UI::Colors::LightGray() }
+	);
+	root.Children().InsertAtTop(min.renderer->Visual());
+
+	max.renderer = CreateButtonRenderer(
+		compositor,
+		SvgMaximize,
+		{ UI::Colors::Transparent(), UI::Colors::NavajoWhite(), UI::Colors::LightGray() }
+	);
+	root.Children().InsertAtTop(max.renderer->Visual());
+
+	close.renderer = CreateButtonRenderer(
+		compositor,
+		SvgClose,
+		{ UI::Colors::Transparent(), UI::Colors::Red(), UI::Colors::DarkRed() }
+	);
+	root.Children().InsertAtTop(close.renderer->Visual());
 }
 
 void ConvertToClientMessage(HWND hwnd, uint32_t msg, WPARAM wParam, LPARAM lParam) {
 	UINT clientMsg = msg + (WM_MOUSEMOVE - WM_NCMOUSEMOVE);
-	printf("Simulating mouse message 0x%X\n", clientMsg);
+	//printf("Simulating mouse message 0x%X\n", clientMsg);
 
 	// NC message use screen coordinates, but non-NC message use client.
 	// Convert the LParam from screen to client.
@@ -304,19 +407,53 @@ void ConvertToClientMessage(HWND hwnd, uint32_t msg, WPARAM wParam, LPARAM lPara
 	ScreenToClient(hwnd, &ptClient);
 	LPARAM lpClient = MAKELPARAM(ptClient.x, ptClient.y);
 
-
 	//
 	// Problem: By default, MAXBUTTON would NOT generate WM_MOUSE* messages (it is non-client area).
 	//
 	//          Send the non-NC equivalent messages to ourselves manually.
 	//
 
-	SendMessage(hwnd, clientMsg, 0, lpClient);
+	::SendMessageW(hwnd, clientMsg, 0, lpClient);
 }
+
+void LogMessage(bool nc, const char* message, Element* element) {
+	std::cout << (nc ? "NC " : "   ") << message << " element=" << element << '\n';
+}
+
+void HandleMouseUp(Element* element, HWND hwnd) {
+	auto same_as_mouse_down = mouse_down_element == element;
+	if (element && same_as_mouse_down) {
+		std::cout << "  mouse up element same as mouse down element\n";
+		switch (element->hit_test_code) {
+		case HTSYSMENU:
+			::SendMessageW(hwnd, WM_SYSCOMMAND, SC_MOUSEMENU, 0);
+			break;
+
+		case HTCLOSE:
+			::DestroyWindow(hwnd);
+			break;
+
+		case HTMAXBUTTON:
+			::ShowWindow(hwnd, ::IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+			break;
+
+		case HTMINBUTTON:
+			::CloseWindow(hwnd);
+			break;
+		}
+	}
+	MouseUp(element);
+}
+
+#define LOG_MESSAGE(message) case (message): printf(#message " wParam=%08x lParam=%08x\n", (uint32_t)wParam, (uint32_t)lParam); break;
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
 	switch (msg) {
+		LOG_MESSAGE(WM_SYSCOMMAND);
+		LOG_MESSAGE(WM_CONTEXTMENU);
+		LOG_MESSAGE(WM_ENTERMENULOOP);
+
 	case WM_NCMOUSEMOVE:
 	{
 		//
@@ -328,17 +465,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		//          hovering over the max button.
 		//
 
+
 		auto element = FindElementWithHT(wParam);
+		LogMessage(true, "mouse move", element);
 		MouseOver(element);
-		//if (wParam == HTCAPTION) {
-		//	SetElementUnderMouse(&top);
-		//}
-		//else if (wParam == HTCLOSE) {
-		//	SetElementUnderMouse(&close);
-		//}
-		//else {
-		ConvertToClientMessage(hwnd, msg, wParam, lParam);
-		//}
+
+		if (element && element->synthesize_client_moves) {
+			ConvertToClientMessage(hwnd, msg, wParam, lParam);
+		}
 
 		return 0;
 
@@ -352,9 +486,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		TRACKMOUSEEVENT tme = { sizeof(tme) };
 		tme.hwndTrack = hwnd;
-		tme.dwFlags = TME_LEAVE;
+		tme.dwFlags = TME_HOVER | TME_LEAVE;
 
 		auto element = FindElementAtClientLParam(lParam);
+		LogMessage(false, "mouse move", element);
 		MouseOver(element);
 
 		if (element && element->hit_test_code != HTCLIENT)
@@ -379,80 +514,37 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 
 	case WM_NCMOUSELEAVE:
+		LogMessage(true, "mouse leave", nullptr);
+		MouseOver(nullptr);
+		break;
+
 	case WM_MOUSELEAVE:
+		LogMessage(false, "mouse leave", nullptr);
 		MouseOver(nullptr);
 		break;
 
 	case WM_LBUTTONDOWN:
 	{
-		printf("WM_LBUTTONDOWN\n");
 		auto element = FindElementAtClientLParam(lParam);
-		MouseOver(element);
-		if (mouse_over_element) {
-			mouse_over_element->MouseDown();
-		}
+		LogMessage(false, "L button DOWN", element);
+		MouseDown(element);
 		break;
 	}
 
 	case WM_NCLBUTTONDOWN:
 	{
-		printf("WM_NCLBUTTONDOWN\n");
 		auto element = FindElementWithHT(wParam);
+		LogMessage(true, "L button DOWN", element);
 		MouseDown(element);
 
-		if (wParam == HTMAXBUTTON) {
-			return 0; // do not let DefWindowProc see this
+		if (element) {
+			wParam = element->hit_test_code;
 		}
-	}
-	break;
 
-	case WM_LBUTTONUP:
-	{
-		auto element = FindElementAtClientLParam(lParam);
-		MouseUp(element);
-		break;
-	}
-
-	case WM_NCLBUTTONUP:
-	{
-		printf("WM_NCLBUTTONUP\n");
-
-		auto element = FindElementWithHT(wParam);
-		auto same_as_mouse_down = mouse_down_element == element;
-
-		if (same_as_mouse_down) {
-			MouseUp(mouse_down_element);
-			if (wParam == HTCLOSE)
-			{
-				DestroyWindow(hwnd);
-				break;
-			}
-			if (wParam == HTMAXBUTTON) {
-				ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
-			}
-		}
-	}
-	break;
-	//
-	// Handle WM_NC* messages. Do NOT send them to DefWindowProc
-	//
-
-	case WM_NCLBUTTONDBLCLK:
-	case WM_NCRBUTTONDOWN:
-	case WM_NCRBUTTONUP:
-	case WM_NCRBUTTONDBLCLK:
-	case WM_NCMBUTTONDOWN:
-	case WM_NCMBUTTONUP:
-	case WM_NCMBUTTONDBLCLK:
-	{
-		printf("NC message 0x%X\n", msg);
-
-		// If button down on close area, destroy the window.
-
-		if (wParam == HTMAXBUTTON)
-		{
-			ConvertToClientMessage(hwnd, msg, wParam, lParam);
-
+		switch (wParam) {
+		case HTMAXBUTTON:
+		case HTMINBUTTON:
+		case HTCLOSE:
 			//
 			// Problem: Handle these messages (do NOT call DefWindowProc).
 			//          Default handling for NC messages with the caption button HT codes (like MAXBUTTON)
@@ -464,6 +556,47 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 			//
 			//          Note: We MUST pass the HTCAPTION to DefWindowProc (or else we'd break dragging).
 			//
+			return 0;
+		}
+	}
+	break;
+
+	case WM_LBUTTONUP:
+	{
+		auto element = FindElementAtClientLParam(lParam);
+		LogMessage(false, "L button UP", element);
+		HandleMouseUp(element, hwnd);
+		break;
+	}
+
+	case WM_NCLBUTTONUP:
+	{
+		auto element = FindElementWithHT(wParam);
+		LogMessage(true, "L button UP", element);
+		HandleMouseUp(element, hwnd);
+		break;
+	}
+
+	
+	 //Handle WM_NC* messages. Do NOT send them to DefWindowProc
+	
+
+	case WM_NCLBUTTONDBLCLK:
+	case WM_NCRBUTTONDOWN:
+	case WM_NCRBUTTONUP:
+	case WM_NCRBUTTONDBLCLK:
+	case WM_NCMBUTTONDOWN:
+	case WM_NCMBUTTONUP:
+	case WM_NCMBUTTONDBLCLK:
+	{
+		//printf("NC message 0x%X\n", msg);
+
+		// If button down on close area, destroy the window.
+
+		if (wParam == HTMAXBUTTON)
+		{
+			ConvertToClientMessage(hwnd, msg, wParam, lParam);
+
 
 			return 0;
 		}
@@ -481,32 +614,12 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	//              HTCAPTION, and for the rest use HTMAXBUTTON.
 	//
 
-	case WM_WINDOWPOSCHANGED:
+	case WM_SIZE:
 	{
 		RECT rcClient;
 		::GetClientRect(hwnd, &rcClient);
 		const UINT dpi = ::GetDpiForWindow(hwnd);
-
-		// Top area is entire top 30 pixels
-		RECT rcTop = rcClient;
-		rcTop.bottom = MulDiv(30, dpi, 96);
-		top.Bounds(rcTop);
-
-		// Close area is right 30 pixels of top area
-		RECT rcClose = rcTop;
-		rcClose.left = rcClose.right - MulDiv(30, dpi, 96);
-		close.Bounds(rcClose);
-
-		// Bottom area is bottom 60 pixels of client area
-		RECT rcButtons = rcClient;
-		rcButtons.top = rcButtons.bottom - MulDiv(60, dpi, 96);
-
-		// Max button is the remaining space
-		RECT rcMaxButton = rcClient;
-		rcMaxButton.top = rcTop.bottom;
-		rcMaxButton.bottom = rcButtons.top;
-		max.Bounds(rcMaxButton);
-
+		LayoutElements(rcClient, dpi);
 		break;
 	}
 
@@ -514,7 +627,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		// Get the default HT code and only handle if HTCLIENT.
 		// This allows the left/right/bottom resize HT codes to flow through.
-		UINT ht = (UINT)DefWindowProc(hwnd, msg, wParam, lParam);
+		UINT ht = (UINT)::DefWindowProcW(hwnd, msg, wParam, lParam);
 
 		if (ht != HTCLIENT)
 		{
@@ -522,7 +635,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		}
 
 		POINT ptClient = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-		ScreenToClient(hwnd, &ptClient);
+		::ScreenToClient(hwnd, &ptClient);
 
 		// Top resize
 		if (ptClient.y < MulDiv(8, GetDpiForWindow(hwnd), 96))
@@ -532,6 +645,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 		auto element = FindElementAt(ptClient);
 		if (element) {
+			std::cout << "WM_NCHITTEST element=" << element << " result=" << element->hit_test_code << '\n';
 			return element->hit_test_code;
 		}
 
@@ -562,7 +676,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		RECT* prc = (PRECT)lParam;
 		auto top = prc->top;
-		auto lRet = DefWindowProc(hwnd, msg, wParam, lParam);
+		auto lRet = ::DefWindowProcW(hwnd, msg, wParam, lParam);
 		prc->top = top;
 		return lRet;
 	}
@@ -591,19 +705,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		root = compositor.CreateContainerVisual();
 		target.Root(root);
 		SetBackdrop(target);
+		CreateRenderers();
 
-
-		max.renderer = CreateButtonRenderer(compositor, { UI::Colors::MediumSeaGreen(), UI::Colors::SeaGreen(), UI::Colors::DarkSeaGreen() });
-		top.renderer = CreateButtonRenderer(compositor, { UI::Colors::Aqua(), UI::Colors::Aqua(),  UI::Colors::Aqua() });
-		close.renderer = CreateButtonRenderer(compositor, { UI::Colors::Transparent(), UI::Colors::Red(), UI::Colors::DarkRed() });
-
-		root.Children().InsertAtTop(max.renderer->Visual());
-		root.Children().InsertAtTop(top.renderer->Visual());
-		root.Children().InsertAtTop(close.renderer->Visual());
-
-		UINT dpi = GetDpiForWindow(hwnd);
-		SIZE sz = { MulDiv(szInitial.cx, dpi, 96), MulDiv(szInitial.cy, dpi, 96) };
-		SetWindowPos(hwnd, nullptr, 150, 300, sz.cx, sz.cy, SWP_SHOWWINDOW);
+		UINT dpi = ::GetDpiForWindow(hwnd);
+		SIZE sz = { ::MulDiv(szInitial.cx, dpi, 96), ::MulDiv(szInitial.cy, dpi, 96) };
+		::SetWindowPos(hwnd, nullptr, 150, 300, sz.cx, sz.cy, SWP_SHOWWINDOW);
 		break;
 	}
 
@@ -611,7 +717,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_CHAR:
 		if (wParam == VK_ESCAPE)
 		{
-			DestroyWindow(hwnd);
+			::DestroyWindow(hwnd);
 		}
 		break;
 
@@ -619,7 +725,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		RECT* prc = (RECT*)lParam;
 
-		SetWindowPos(hwnd,
+		::SetWindowPos(hwnd,
 			nullptr,
 			prc->left,
 			prc->top,
@@ -630,11 +736,11 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	}
 
 	case WM_DESTROY:
-		PostQuitMessage(0);
+		::PostQuitMessage(0);
 		break;
 	}
 
-	return DefWindowProc(hwnd, msg, wParam, lParam);
+	return ::DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 bool InitWindow(HINSTANCE hInst)
@@ -653,11 +759,11 @@ bool InitWindow(HINSTANCE hInst)
 
 	if (!RegisterClassEx(&wc))
 	{
-		MessageBox(NULL, L"RegisterClassEx Failed!", L"ERROR", MB_ICONEXCLAMATION | MB_OK);
+		::MessageBoxW(NULL, L"RegisterClassEx Failed!", L"ERROR", MB_ICONEXCLAMATION | MB_OK);
 		return false;
 	}
 
-	if (!CreateWindowEx(0,
+	if (!::CreateWindowExW(0,
 		wndClassName,
 		windowTitle,
 		WS_OVERLAPPEDWINDOW,
@@ -670,7 +776,7 @@ bool InitWindow(HINSTANCE hInst)
 		hInst,
 		nullptr))
 	{
-		MessageBox(NULL, L"CreateWindowEx Failed!", L"ERROR", MB_ICONEXCLAMATION | MB_OK);
+		::MessageBoxW(NULL, L"CreateWindowEx Failed!", L"ERROR", MB_ICONEXCLAMATION | MB_OK);
 		return false;
 	}
 
@@ -679,6 +785,8 @@ bool InitWindow(HINSTANCE hInst)
 
 int __stdcall wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ wchar_t*, _In_ int)
 {
+	::SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
 	if (!InitWindow(hInstance))
 	{
 		return 1;

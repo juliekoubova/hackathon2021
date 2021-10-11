@@ -161,24 +161,6 @@
     <ResourceCompile Include="WindowsProject1.rc" />
   </ItemGroup>
   <ItemGroup>
-    <Image Include="120.png">
-      <DeploymentContent>true</DeploymentContent>
-    </Image>
-    <Image Include="144.png">
-      <DeploymentContent>true</DeploymentContent>
-    </Image>
-    <Image Include="168.png">
-      <DeploymentContent>true</DeploymentContent>
-    </Image>
-    <Image Include="192.png">
-      <DeploymentContent>true</DeploymentContent>
-    </Image>
-    <Image Include="216.png">
-      <DeploymentContent>true</DeploymentContent>
-    </Image>
-    <Image Include="96.png">
-      <DeploymentContent>true</DeploymentContent>
-    </Image>
     <Image Include="small.ico" />
     <Image Include="WindowsProject1.ico" />
   </ItemGroup>
