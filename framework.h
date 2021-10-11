@@ -12,6 +12,8 @@
 #include <wil/cppwinrt.h>
 #include <wil/result.h>
 #include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Composition.h>
 #include <winrt/Windows.UI.Composition.Desktop.h>
@@ -23,7 +25,9 @@
 #include "winrt/Microsoft.Graphics.Canvas.UI.Composition.h"
 
 // C RunTime Header Files
+#include <sstream>
 #include <stdlib.h>
 #include <malloc.h>
 #include <memory.h>
 #include <tchar.h>
+#include <functional>

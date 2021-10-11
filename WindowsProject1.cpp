@@ -5,6 +5,8 @@
 
 const SIZE szInitial = { 700, 500 };
 
+namespace Foundation = winrt::Windows::Foundation;
+namespace Numerics = Foundation::Numerics;
 namespace UI = winrt::Windows::UI;
 
 namespace UIComposition {
@@ -51,8 +53,12 @@ void SetBackdrop(UIComposition::Desktop::DesktopWindowTarget target) {
 	supports_backdrop->put_SystemBackdrop(brush.as<UIComposition::abi::ICompositionBrush>().get());
 }
 
-UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor compositor, const winrt::hstring& svg, float scale) {
-	auto size = winrt::Windows::Foundation::Size(16 * scale, 16 * scale);
+template<typename Callable>
+UIComposition::CompositionSurfaceBrush CreateCanvasBrush(
+	UIComposition::Compositor compositor,
+	winrt::Windows::Foundation::Size size,
+	Callable&& callable
+) {
 	auto canvas_device = Canvas::CanvasDevice::GetSharedDevice();
 	auto composition_device = Canvas::UI::Composition::CanvasComposition::CreateCompositionGraphicsDevice(compositor, canvas_device);
 	auto drawing_surface = composition_device.CreateDrawingSurface(
@@ -62,23 +68,27 @@ UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor 
 	);
 
 	{
-		winrt::Windows::Foundation::Rect rect{};
-		rect.Width = size.Width;
-		rect.Height = size.Height;
-
-		auto svg_document = Canvas::Svg::CanvasSvgDocument::LoadFromXml(canvas_device, svg);
-		auto drawing_session = Canvas::UI::Composition::CanvasComposition::CreateDrawingSession(
-			drawing_surface
-			//,
-			//rect,
-			//scale
-		);
-		drawing_session.DrawSvg(svg_document, size);
+		auto drawing_session = Canvas::UI::Composition::CanvasComposition::CreateDrawingSession(drawing_surface);
+		callable(canvas_device, drawing_session);
+		drawing_session.Flush();
 	}
 
 	auto surface_brush = compositor.CreateSurfaceBrush();
 	surface_brush.Surface(drawing_surface);
 	return surface_brush;
+}
+
+UIComposition::CompositionSurfaceBrush CreateSvgBrush(
+	UIComposition::Compositor compositor,
+	winrt::Windows::Foundation::Size size,
+	winrt::hstring svg
+) {
+	return CreateCanvasBrush(compositor, size, [size, svg = std::move(svg)](
+		Canvas::CanvasDevice canvas_device,
+		Canvas::CanvasDrawingSession drawing_session) {
+		auto svg_document = Canvas::Svg::CanvasSvgDocument::LoadFromXml(canvas_device, svg);
+		drawing_session.DrawSvg(svg_document, size);
+	});
 }
 
 std::wstring GetLocaleNameFromLCID(DWORD lcid) {
@@ -158,12 +168,28 @@ enum class RendererState { Normal, MouseOver, MouseDown };
 class Renderer {
 public:
 	virtual ~Renderer() = default;
-	virtual void SetState(RendererState) {}
 	virtual void SetRasterizationScale(float) {}
+	virtual void SetState(RendererState) {}
 
 	virtual UIComposition::Visual Visual() = 0;
 };
 
+template <typename RendererT>
+class DelegatingRenderer : public Renderer {
+protected:
+	template<typename... Args>
+	DelegatingRenderer(Args&&... args) : renderer_{ std::forward<Args>(args)... } {}
+
+	RendererT& Delegate() { return renderer_; }
+
+public:
+	void SetRasterizationScale(float scale) { renderer_.SetRasterizationScale(scale); }
+	void SetState(RendererState state) { renderer_.SetState(state); }
+	UIComposition::Visual Visual() { return renderer_.Visual(); }
+
+private:
+	RendererT renderer_;
+};
 
 struct RendererColors {
 	UI::Color normal;
@@ -188,8 +214,8 @@ public:
 		ForEach(&Renderer::SetState, state);
 	}
 
-	void SetRasterizationScale(float scale) final {
-		ForEach(&Renderer::SetRasterizationScale, scale);
+	void SetRasterizationScale(float dpi) final {
+		ForEach(&Renderer::SetRasterizationScale, dpi);
 	}
 
 	UIComposition::Visual Visual() final { return visual_; }
@@ -240,46 +266,117 @@ private:
 	RendererColors colors_;
 };
 
-class GlyphRenderer final : public Renderer {
-
+class SpriteRenderer final : public Renderer {
 public:
-	GlyphRenderer(UIComposition::Compositor compositor, winrt::hstring glyph, RendererColors colors)
-		: visual_{ compositor.CreateSpriteVisual() },
-		brush_{ nullptr },
-		glyph_{ glyph },
-		compositor_{ compositor }
-	{
-		//brush_.AnchorPoint({ 0.5f, 0.5f });
-		//brush_.Offset({ 0.0f, 0.0f });
-		visual_.RelativeSizeAdjustment({ 1.0f, 1.0f });
+	using BrushFactory = std::function<UIComposition::CompositionBrush(UIComposition::Compositor, float)>;
+
+	SpriteRenderer(UIComposition::Compositor compositor, BrushFactory brush_factory = nullptr)
+		: compositor_{ std::move(compositor) },
+		brush_factory_{ std::move(brush_factory) },
+		visual_{ compositor_.CreateSpriteVisual() } {
+		Update();
+	}
+
+	void SetBrushFactory(BrushFactory brush_factory) {
+		brush_factory_ = std::move(brush_factory);
+		Update();
 	}
 
 	void SetRasterizationScale(float scale) final {
-		if (scale != raster_scale_) {
-			brush_ = CreateSvgBrush(compositor_, glyph_, scale);
-			brush_.Stretch(UIComposition::CompositionStretch::None);
-			visual_.Brush(brush_);
-			raster_scale_ = scale;
+		if (scale_ != scale) {
+			scale_ = scale;
+			Update();
 		}
 	}
 
 	UIComposition::Visual Visual() final { return visual_; }
+	UIComposition::SpriteVisual SpriteVisual() { return visual_; }
 
 private:
-	UIComposition::CompositionSurfaceBrush brush_;
-	UIComposition::SpriteVisual visual_;
+
+	void Update() {
+		brush_ = brush_factory_ ? brush_factory_(compositor_, scale_) : nullptr;
+		visual_.Brush(brush_);
+	}
+
+	BrushFactory brush_factory_;
 	UIComposition::Compositor compositor_;
-	winrt::hstring glyph_;
-	float raster_scale_ = 0;
+	UIComposition::SpriteVisual visual_;
+
+	UIComposition::CompositionBrush brush_ = nullptr;
+	float scale_ = 1.0f;
 };
 
-std::unique_ptr<Renderer> CreateButtonRenderer(UIComposition::Compositor compositor, winrt::hstring glyph, RendererColors background_colors) {
-	auto container = std::make_unique<ContainerRenderer>(compositor);
-	container->InsertAtTop(std::make_unique<BackgroundRenderer>(compositor, background_colors));
-	container->InsertAtTop(std::make_unique<GlyphRenderer>(compositor, glyph, background_colors));
-	return container;
+class DebugTextRenderer final : public DelegatingRenderer<SpriteRenderer> {
+public:
+
+	DebugTextRenderer(UIComposition::Compositor compositor)
+		: DelegatingRenderer{ compositor } {}
+
+	void Text(winrt::hstring text) {
+		Delegate().SetBrushFactory([text = std::move(text)](UIComposition::Compositor compositor, float rasterization_scale) {
+			Foundation::Size size{ 200 * rasterization_scale, 50 * rasterization_scale };
+			auto brush = CreateCanvasBrush(
+				compositor,
+				size,
+				[text](Canvas::CanvasDevice, Canvas::CanvasDrawingSession drawing_session) {
+					drawing_session.DrawTextW(text, { 8,8 }, UI::Colors::Black());
+				});
+			brush.Stretch(UIComposition::CompositionStretch::None);
+			brush.HorizontalAlignmentRatio(0);
+			brush.VerticalAlignmentRatio(0);
+			brush.SnapToPixels(true);
+			return brush;
+		});
+	}
+
+};
+
+std::unique_ptr<SpriteRenderer> MakeButtonGlyphRenderer(UIComposition::Compositor compositor, winrt::hstring glyph) {
+	return std::make_unique<SpriteRenderer>(
+		compositor,
+		[glyph = std::move(glyph)](UIComposition::Compositor compositor, float rasterization_scale)
+	{
+		auto size = 16.0f * rasterization_scale;
+		auto brush = CreateSvgBrush(compositor, { size,size }, glyph);
+		brush.Stretch(UIComposition::CompositionStretch::None);
+		brush.SnapToPixels(true);
+		return brush;
+	});
 }
 
+class ButtonRenderer final : public DelegatingRenderer<ContainerRenderer> {
+public:
+
+	ButtonRenderer(UIComposition::Compositor compositor, RendererColors background_colors, const std::vector<winrt::hstring>& glyphs)
+		: DelegatingRenderer{ compositor } {
+
+		Delegate().InsertAtTop(std::make_unique<BackgroundRenderer>(compositor, background_colors));
+		glyph_visuals_.reserve(glyphs.size());
+
+		auto first = true;
+		for (const auto& glyph : glyphs) {
+			auto renderer = MakeButtonGlyphRenderer(compositor, glyph);
+			auto visual = renderer->Visual();
+			glyph_visuals_.push_back(visual);
+			Delegate().InsertAtTop(std::move(renderer));
+
+			visual.RelativeSizeAdjustment({ 1,1 });
+			visual.IsVisible(first);
+			first = false;
+		}
+	}
+
+	void SetActiveGlyph(size_t index) {
+		for (size_t i = 0; i < glyph_visuals_.size(); ++i) {
+			glyph_visuals_[i].IsVisible(i == index);
+		}
+	}
+
+
+private:
+	std::vector<UIComposition::Visual> glyph_visuals_;
+};
 
 struct Element {
 
@@ -357,8 +454,12 @@ Element close{ "close", HTCLOSE };
 Element title{ "title", HTCAPTION, true };
 Element min{ "min", HTMINBUTTON };
 Element icon{ "icon", HTSYSMENU };
+Element canvas{ "canvas", HTCLIENT };
 
-std::vector<std::reference_wrapper<Element>> elements{ title, icon, min, max, close };
+ButtonRenderer* max_renderer;
+DebugTextRenderer* canvas_renderer;
+
+std::vector<std::reference_wrapper<Element>> elements{ canvas, title, icon, min, max, close };
 MouseState mouse_state;
 
 template <typename Callable, typename...Args>
@@ -439,10 +540,15 @@ void LayoutElements(const RECT& rcClient, uint32_t dpi) {
 	rcMinButton.right = rcMaxButton.left;
 	min.Bounds(rcMinButton);
 
+	RECT rcCanvas = rcClient;
+	rcCanvas.top = rcTop.bottom;
+	canvas.Bounds(rcCanvas);
+
 	ForEachElement(&Element::SetDpi, dpi);
 }
 
 void CreateRenderers() {
+
 	title.renderer = std::make_unique<BackgroundRenderer>(
 		compositor,
 		RendererColors{ UI::Colors::Aqua(), UI::Colors::Aqua(),  UI::Colors::Aqua() }
@@ -455,26 +561,35 @@ void CreateRenderers() {
 	);
 	root.Children().InsertAtTop(icon.renderer->Visual());
 
-	min.renderer = CreateButtonRenderer(
+	min.renderer = std::make_unique<ButtonRenderer>(
 		compositor,
-		SvgMinimize,
-		{ UI::Colors::Transparent(), UI::Colors::NavajoWhite(), UI::Colors::LightGray() }
+		RendererColors{ UI::Colors::Transparent(), UI::Colors::NavajoWhite(), UI::Colors::LightGray() },
+		std::vector<winrt::hstring>{ SvgMinimize }
 	);
 	root.Children().InsertAtTop(min.renderer->Visual());
 
-	max.renderer = CreateButtonRenderer(
+	auto max_ptr = std::make_unique<ButtonRenderer>(
 		compositor,
-		SvgMaximize,
-		{ UI::Colors::Transparent(), UI::Colors::NavajoWhite(), UI::Colors::LightGray() }
+		RendererColors{ UI::Colors::Transparent(), UI::Colors::NavajoWhite(), UI::Colors::LightGray() },
+		std::vector<winrt::hstring>{ SvgRestore, SvgMaximize }
 	);
-	root.Children().InsertAtTop(max.renderer->Visual());
+	root.Children().InsertAtTop(max_ptr->Visual());
+	max_renderer = max_ptr.get();
+	max.renderer = std::move(max_ptr);
 
-	close.renderer = CreateButtonRenderer(
+	close.renderer = std::make_unique<ButtonRenderer>(
 		compositor,
-		SvgClose,
-		{ UI::Colors::Transparent(), UI::Colors::Red(), UI::Colors::DarkRed() }
+		RendererColors{ UI::Colors::Transparent(), UI::Colors::Red(), UI::Colors::DarkRed() },
+		std::vector<winrt::hstring>{SvgClose}
 	);
 	root.Children().InsertAtTop(close.renderer->Visual());
+
+	auto canvas_ptr = std::make_unique<DebugTextRenderer>(compositor);
+	canvas_ptr->Text(L"hello");
+	canvas_renderer = canvas_ptr.get();
+	canvas.renderer = std::move(canvas_ptr);
+	root.Children().InsertAtTop(canvas.renderer->Visual());
+
 }
 
 void ConvertToClientMessage(HWND hwnd, uint32_t msg, WPARAM wParam, LPARAM lParam) {
@@ -584,6 +699,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		LogMessage(false, "mouse move", element);
 		MouseOver(element);
 
+		std::wstringstream wss;
+		wss << L"x=" << GET_X_LPARAM(lParam) << L" y=" << GET_Y_LPARAM(lParam);
+
+		canvas_renderer->Text(wss.str().c_str());
 		if (element && element->hit_test_code != HTCLIENT)
 		{
 			//
@@ -606,12 +725,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 
 	case WM_NCMOUSELEAVE:
-		LogMessage(true, "mouse leave", nullptr);
 		MouseOver(nullptr);
 		break;
 
 	case WM_MOUSELEAVE:
-		LogMessage(false, "mouse leave", nullptr);
 		MouseOver(nullptr);
 		break;
 
@@ -722,6 +839,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		::GetClientRect(hwnd, &rcClient);
 		const UINT dpi = ::GetDpiForWindow(hwnd);
 		LayoutElements(rcClient, dpi);
+		max_renderer->SetActiveGlyph(wParam == SIZE_MAXIMIZED ? 0 : 1);
 		break;
 	}
 
