@@ -1,5 +1,6 @@
 #include "framework.h"
 #include <windowsx.h>
+#include <wil/result.h>
 #include <iostream>
 
 const SIZE szInitial = { 700, 500 };
@@ -79,6 +80,78 @@ UIComposition::CompositionSurfaceBrush CreateSvgBrush(UIComposition::Compositor 
 	surface_brush.Surface(drawing_surface);
 	return surface_brush;
 }
+
+std::wstring GetLocaleNameFromLCID(DWORD lcid) {
+	std::wstring result(LOCALE_NAME_MAX_LENGTH, L'\0');
+	auto length = static_cast<size_t>(
+		::LCIDToLocaleName(lcid, result.data(), LOCALE_NAME_MAX_LENGTH, 0 /* dwFlags */));
+	THROW_LAST_ERROR_IF(length == 0);
+	result.resize(length - 1);
+	return (result);
+}
+
+
+bool IsRTL() {
+	LANGID lang_id = ::GetUserDefaultUILanguage();
+	std::wstring locale_name = GetLocaleNameFromLCID(MAKELCID(lang_id, SORT_DEFAULT));
+
+	uint32_t reading_layout;
+
+	THROW_IF_WIN32_BOOL_FALSE(::GetLocaleInfoEx(locale_name.c_str(),
+		LOCALE_IREADINGLAYOUT | LOCALE_RETURN_NUMBER,
+		reinterpret_cast<LPWSTR>(&reading_layout),
+		sizeof(reading_layout) / sizeof(wchar_t)));
+
+	// 1 => Read from right to left, as for Arabic locales.
+	// https://docs.microsoft.com/en-us/windows/win32/intl/locale-ireadinglayout
+	return (reading_layout == 1);
+}
+
+class SystemMenu {
+public:
+	explicit SystemMenu(HWND hwnd) : hwnd_{ hwnd }, hmenu_{ THROW_LAST_ERROR_IF_NULL(::GetSystemMenu(hwnd, FALSE)) } {}
+
+	void Show(uint32_t hit_test_code, LPARAM lparam) {
+		UINT flags = TPM_TOPALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD;
+		WI_SetFlagIf(flags, TPM_LAYOUTRTL, IsRTL());
+		WI_SetFlagIf(flags, TPM_RIGHTALIGN, ::GetSystemMetrics(SM_MENUDROPALIGNMENT));
+
+		PrepareToShow(hit_test_code);
+
+		auto x = GET_X_LPARAM(lparam);
+		auto y = GET_Y_LPARAM(lparam);
+		auto command = ::TrackPopupMenu(hmenu_, flags, x, y, 0, hwnd_, nullptr);
+		::SendMessageW(hwnd_, WM_SYSCOMMAND, command, lparam);
+	}
+
+private:
+
+	void PrepareToShow(uint32_t hit_test_code) {
+		uint16_t default_command = SC_CLOSE;
+		if (hit_test_code == HTCAPTION) {
+			default_command = ::IsZoomed(hwnd_) ? SC_RESTORE : SC_MAXIMIZE;
+		}
+		THROW_IF_WIN32_BOOL_FALSE(::SetMenuDefaultItem(hmenu_, default_command, FALSE));
+
+		bool maximized = ::IsZoomed(hwnd_);
+		bool minimized = ::IsIconic(hwnd_);
+		bool restored = !maximized && !minimized;
+
+		SetMenuItemEnabled(SC_RESTORE, !restored);
+		SetMenuItemEnabled(SC_SIZE, restored);
+		SetMenuItemEnabled(SC_MOVE, restored);
+		SetMenuItemEnabled(SC_MINIMIZE, !minimized);
+		SetMenuItemEnabled(SC_MAXIMIZE, !maximized);
+	}
+
+	void SetMenuItemEnabled(uint16_t command, bool enabled) {
+		THROW_LAST_ERROR_IF(::EnableMenuItem(hmenu_, command, enabled ? MF_ENABLED : MF_DISABLED) == -1);
+	}
+
+private:
+	HWND hwnd_;
+	HMENU hmenu_;
+};
 
 enum class RendererState { Normal, MouseOver, MouseDown };
 
@@ -260,7 +333,7 @@ std::ostream& operator<<(std::ostream& stream, const RECT& rect) {
 }
 
 std::ostream& operator<<(std::ostream& stream, const Element& el) {
-	return stream << el.comment << " (" << el.Bounds() << ")";
+	return stream << el.comment;
 }
 
 std::ostream& operator<<(std::ostream& stream, const Element* el) {
@@ -272,6 +345,12 @@ std::ostream& operator<<(std::ostream& stream, const Element* el) {
 	}
 }
 
+enum class MouseButton { Left, Right, Other };
+
+struct MouseState {
+	std::optional<MouseButton> button;
+	Element* element = nullptr;
+};
 
 Element max{ "max", HTMAXBUTTON };
 Element close{ "close", HTCLOSE };
@@ -280,7 +359,7 @@ Element min{ "min", HTMINBUTTON };
 Element icon{ "icon", HTSYSMENU };
 
 std::vector<std::reference_wrapper<Element>> elements{ title, icon, min, max, close };
-Element* mouse_down_element = nullptr;
+MouseState mouse_state;
 
 template <typename Callable, typename...Args>
 void ForEachElement(Callable&& callable, Args&&... args) {
@@ -319,16 +398,18 @@ void MouseOver(Element* element) {
 		});
 }
 
-void MouseDown(Element* element) {
+void MouseDown(Element* element, MouseButton button) {
 	ForEachElement([element](Element& el) {
 		el.SetState(&el == element ? RendererState::MouseDown : RendererState::Normal);
 		});
-	mouse_down_element = element;
+	mouse_state.element = element;
+	mouse_state.button = button;
 }
 
 void MouseUp(Element* element) {
 	MouseOver(element);
-	mouse_down_element = nullptr;
+	mouse_state.element = nullptr;
+	mouse_state.button = std::nullopt;
 }
 
 void LayoutElements(const RECT& rcClient, uint32_t dpi) {
@@ -420,26 +501,37 @@ void LogMessage(bool nc, const char* message, Element* element) {
 	std::cout << (nc ? "NC " : "   ") << message << " element=" << element << '\n';
 }
 
-void HandleMouseUp(Element* element, HWND hwnd) {
-	auto same_as_mouse_down = mouse_down_element == element;
+void HandleMouseUp(Element* element, HWND hwnd, LPARAM lparam, MouseButton button) {
+	auto same_as_mouse_down = mouse_state.element == element;
 	if (element && same_as_mouse_down) {
 		std::cout << "  mouse up element same as mouse down element\n";
-		switch (element->hit_test_code) {
-		case HTSYSMENU:
-			::SendMessageW(hwnd, WM_SYSCOMMAND, SC_MOUSEMENU, 0);
-			break;
+		if (button == MouseButton::Right) {
+			switch (element->hit_test_code) {
+			case HTCAPTION:
+			case HTSYSMENU:
+				SystemMenu menu{ hwnd };
+				menu.Show(element->hit_test_code, lparam);
+				break;
+			}
+		}
+		else if (button == MouseButton::Left) {
+			switch (element->hit_test_code) {
+			case HTCLOSE:
+				::DestroyWindow(hwnd);
+				break;
 
-		case HTCLOSE:
-			::DestroyWindow(hwnd);
-			break;
+			case HTSYSMENU:
+				SystemMenu{ hwnd }.Show(HTSYSMENU, lparam);
+				break;
 
-		case HTMAXBUTTON:
-			::ShowWindow(hwnd, ::IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
-			break;
+			case HTMAXBUTTON:
+				::ShowWindow(hwnd, ::IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+				break;
 
-		case HTMINBUTTON:
-			::CloseWindow(hwnd);
-			break;
+			case HTMINBUTTON:
+				::CloseWindow(hwnd);
+				break;
+			}
 		}
 	}
 	MouseUp(element);
@@ -526,16 +618,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	case WM_LBUTTONDOWN:
 	{
 		auto element = FindElementAtClientLParam(lParam);
-		LogMessage(false, "L button DOWN", element);
-		MouseDown(element);
+		MouseDown(element, MouseButton::Left);
 		break;
 	}
 
 	case WM_NCLBUTTONDOWN:
 	{
 		auto element = FindElementWithHT(wParam);
-		LogMessage(true, "L button DOWN", element);
-		MouseDown(element);
+		MouseDown(element, MouseButton::Left);
 
 		if (element) {
 			wParam = element->hit_test_code;
@@ -545,6 +635,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 		case HTMAXBUTTON:
 		case HTMINBUTTON:
 		case HTCLOSE:
+		case HTSYSMENU:
 			//
 			// Problem: Handle these messages (do NOT call DefWindowProc).
 			//          Default handling for NC messages with the caption button HT codes (like MAXBUTTON)
@@ -561,59 +652,70 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	}
 	break;
 
+	case WM_NCRBUTTONDOWN:
+	{
+		auto element = FindElementWithHT(wParam);
+		MouseDown(element, MouseButton::Right);
+		break;
+	}
+
+	case WM_RBUTTONDOWN:
+	{
+		auto element = FindElementAtClientLParam(lParam);
+		MouseDown(element, MouseButton::Right);
+		break;
+	}
+
 	case WM_LBUTTONUP:
 	{
 		auto element = FindElementAtClientLParam(lParam);
-		LogMessage(false, "L button UP", element);
-		HandleMouseUp(element, hwnd);
+		HandleMouseUp(element, hwnd, lParam, MouseButton::Left);
 		break;
 	}
 
 	case WM_NCLBUTTONUP:
 	{
 		auto element = FindElementWithHT(wParam);
-		LogMessage(true, "L button UP", element);
-		HandleMouseUp(element, hwnd);
+		HandleMouseUp(element, hwnd, lParam, MouseButton::Left);
 		break;
 	}
 
-	
-	 //Handle WM_NC* messages. Do NOT send them to DefWindowProc
-	
+	case WM_RBUTTONUP:
+	{
+		auto element = FindElementAtClientLParam(lParam);
+		HandleMouseUp(element, hwnd, lParam, MouseButton::Right);
+		break;
+	}
 
-	case WM_NCLBUTTONDBLCLK:
-	case WM_NCRBUTTONDOWN:
 	case WM_NCRBUTTONUP:
+	{
+		auto element = FindElementWithHT(wParam);
+		HandleMouseUp(element, hwnd, lParam, MouseButton::Right);
+		return 0; // we're handling input
+	}
+
+	//Handle WM_NC* messages. Do NOT send them to DefWindowProc
+	case WM_NCLBUTTONDBLCLK:
 	case WM_NCRBUTTONDBLCLK:
 	case WM_NCMBUTTONDOWN:
 	case WM_NCMBUTTONUP:
 	case WM_NCMBUTTONDBLCLK:
-	{
-		//printf("NC message 0x%X\n", msg);
-
-		// If button down on close area, destroy the window.
-
-		if (wParam == HTMAXBUTTON)
-		{
-			ConvertToClientMessage(hwnd, msg, wParam, lParam);
-
-
+		switch (wParam) {
+		case HTMAXBUTTON:
+		case HTMINBUTTON:
 			return 0;
 		}
 		break;
-	}
 
-
-	//
-	// RESTRICTION: NCHITTEST over this area must return HTMAXBUTTON (or else no flyout).
-	//
-	//              Using WM_WINDOWPOSCHANGED, create a top area that is draggable and
-	//              'close button' in top-right).
-	//
-	//              Using WM_NCHITTEST, if default is HTCLIENT, split into HTTOP, HTCLOSE,
-	//              HTCAPTION, and for the rest use HTMAXBUTTON.
-	//
-
+		//
+		// RESTRICTION: NCHITTEST over this area must return HTMAXBUTTON (or else no flyout).
+		//
+		//              Using WM_WINDOWPOSCHANGED, create a top area that is draggable and
+		//              'close button' in top-right).
+		//
+		//              Using WM_NCHITTEST, if default is HTCLIENT, split into HTTOP, HTCLOSE,
+		//              HTCAPTION, and for the rest use HTMAXBUTTON.
+		//
 	case WM_SIZE:
 	{
 		RECT rcClient;
